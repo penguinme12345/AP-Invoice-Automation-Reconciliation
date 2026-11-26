@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "AP invoice automation: LangChain extraction, Pydantic validation, SQL three-way match, Jira exceptions"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 dependencies = [
     "pydantic>=2.7",
     "langchain-core>=0.3",

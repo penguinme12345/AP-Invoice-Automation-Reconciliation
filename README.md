@@ -1,16 +1,43 @@
 # AP Invoice Automation & Reconciliation
 
+[![CI](https://github.com/penguinme12345/AP-Invoice-Automation-Reconciliation/actions/workflows/ci.yml/badge.svg)](https://github.com/penguinme12345/AP-Invoice-Automation-Reconciliation/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-extraction-1C3C3C)
+![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063)
+![SQL](https://img.shields.io/badge/SQL-SQLite-003B57?logo=sqlite&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-52%20passing-2ea44f)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+**An end-to-end procure-to-pay pipeline: vendor invoice PDF in, three-way match in
+SQL, clean invoices to the payment sheet, exceptions to Jira, and a dashboard on top.**
+
+> 150 test invoices · **73% matched with no manual work** · **41 / 41 planted
+> exceptions caught** · **0 false approvals** · ~25 ms per invoice ·
+> runs offline with one command
+
 Accounts payable teams check invoices against purchase orders by hand and chase
 mismatches over email. This project automates procure-to-pay from the moment a
 vendor invoice lands in a Google Drive folder to the dashboard that reports on it:
 
-1. **Intake** – a new PDF in the Drive intake folder triggers the workflow.
+```mermaid
+flowchart LR
+    A[Invoice PDF<br/>in Google Drive] --> B[LangChain + Claude<br/>extraction]
+    B --> C{Pydantic<br/>validation}
+    C -- bad data --> J
+    C -- valid --> D[(SQL: invoices,<br/>POs, receipts)]
+    D --> E{Three-way<br/>match}
+    E -- clean --> S[Approved for payment<br/>Google Sheet]
+    E -- exception --> J[Jira ticket<br/>routed by department]
+    D --> V[[Dashboard:<br/>aging, spend, budget vs actual]]
+```
+
+1. **Intake** – a new PDF in the Drive intake folder triggers the workflow (n8n, or Workato).
 2. **Extraction** – LangChain + Claude reads the PDF (vendor, invoice #, PO #,
    dates, line items, totals).
 3. **Validation** – Pydantic rejects bad extractions (missing fields, bad PO
    format, line math or totals that don't add up) instead of saving them.
 4. **Three-way match in SQL** – invoice vs purchase order vs goods receipt:
-   amount within ±2%, quantities received, not a duplicate, vendor approved.
+   amount within ±2%, quantities received, currency, not a duplicate, vendor approved.
 5. **Routing** – clean invoices go to an *Approved for payment* Google Sheet;
    exceptions become Jira tickets, routed by department, with high-dollar
    flags and a 3-day reminder.
@@ -21,7 +48,13 @@ A synthetic mini-ERP (vendors, POs, goods receipts, departments, budgets) for a
 made-up company stands in for Oracle ERP, and every external service has an
 offline mock, so **the whole thing runs with one command and no credentials.**
 
+**Tech stack:** Python · LangChain (`langchain-anthropic`) · Claude · Pydantic v2 ·
+SQL (SQLite, Postgres-ready) · pdfplumber · ReportLab · Jira Cloud REST API ·
+Google Drive / Sheets APIs · n8n (Workato mapping) · pytest · GitHub Actions
+
 ![Dashboard](docs/img/dashboard.png)
+
+*The generated dashboard (`outputs/dashboard.html`), built from the SQL reporting views.*
 
 ## Quick start
 
@@ -39,7 +72,8 @@ truth and builds the dashboard. It takes about 6 seconds.
 == AP invoice automation demo (extractor: offline, as of 2026-11-20) ==
 ERP loaded: 22 vendors, 162 POs, 155 goods receipts, 14 budget lines
 Wrote 150 invoice PDFs to data/inbox
-Processed 150 new invoices (150 in inbox): 109 approved for payment, 41 sent to Jira. ...
+Processed 150 new invoices (150 in inbox): 109 approved for payment, 41 sent to Jira.
+Simulated payment run: paid 82 approved invoices that reached their due date.
 SLA job: 40 tickets open more than 3 days got a reminder
 
 Matched 72.7% of 150 invoices with no manual work (109 auto-approved, 41 exceptions).
@@ -243,3 +277,7 @@ n8n/                    importable n8n workflow
 samples/invoices/       one PDF per scenario
 data/, outputs/         generated (git-ignored)
 ```
+
+## License
+
+[MIT](LICENSE). All company, vendor and people names in the synthetic data are made up.
