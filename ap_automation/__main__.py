@@ -5,6 +5,7 @@
     python -m ap_automation run [--json] [--integrations none]
     python -m ap_automation sla           # 3-day reminder job
     python -m ap_automation report        # evaluation + BI exports + dashboard
+    python -m ap_automation link-ticket <invoice_id> <JIRA-KEY>   # after n8n/Workato creates the issue
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from .dashboard import build_dashboard
 from .datagen import generate_world, load_erp
 from .evaluate import evaluate, export_bi, report_markdown
 from .invoice_pdfs import write_invoices
-from .pipeline import (Pipeline, build_components, clear_outputs, load_arrival_times, payment_run,
+from .pipeline import (Pipeline, build_components, clear_outputs, link_ticket, load_arrival_times, payment_run,
                        run_sla_job, set_as_of)
 
 
@@ -36,17 +37,19 @@ def cmd_setup(s: Settings, conn) -> None:
     print(f"Wrote {len(world.invoices)} invoice PDFs to {s.inbox_dir}")
 
 
-def cmd_run(s: Settings, conn, integrations: str = "mock", as_json: bool = False):
+def cmd_run(s: Settings, conn, integrations: str = "mock", as_json: bool = False, simulate_payments: bool = False):
     extractor, source, jira, sheet = build_components(s, conn, integrations, load_arrival_times(s))
     summary = Pipeline(s, conn, extractor, source, jira, sheet).run()
-    summary.paid = payment_run(conn, s.as_of.isoformat())
+    if simulate_payments:
+        summary.paid = payment_run(conn, s.as_of.isoformat())
     if as_json:
         json.dump([asdict(o) for o in summary.outcomes], sys.stdout, indent=2, default=str)
         print()
     else:
         print(f"Processed {summary.files_new} new invoices ({summary.files_seen} in inbox): "
-              f"{summary.matched} approved for payment, {summary.exceptions} sent to Jira. "
-              f"Payment run paid {summary.paid} invoices that reached their due date.")
+              f"{summary.matched} approved for payment, {summary.exceptions} sent to Jira.")
+        if simulate_payments:
+            print(f"Simulated payment run: paid {summary.paid} approved invoices that reached their due date.")
     return jira
 
 
@@ -80,6 +83,9 @@ def main(argv=None) -> int:
     r.add_argument("--integrations", choices=["mock", "none"], default="mock",
                    help="'none' leaves Jira/Sheets to the orchestrator")
     sub.add_parser("sla", help="send reminders on exception tickets past the SLA")
+    lt = sub.add_parser("link-ticket", help="attach the Jira key an orchestrator created to a local exception")
+    lt.add_argument("invoice_id", type=int)
+    lt.add_argument("key")
     sub.add_parser("report", help="evaluate against ground truth, export BI CSVs, build dashboard")
     args = p.parse_args(argv)
 
@@ -92,6 +98,10 @@ def main(argv=None) -> int:
         cmd_setup(s, conn)
     elif args.cmd == "run":
         cmd_run(s, conn, args.integrations, args.json)
+    elif args.cmd == "link-ticket":
+        ok = link_ticket(conn, args.invoice_id, args.key)
+        print(("Linked" if ok else "No local ticket for") + f" invoice {args.invoice_id} -> {args.key}")
+        return 0 if ok else 1
     elif args.cmd == "sla":
         cmd_sla(s, conn)
     elif args.cmd == "report":
@@ -99,7 +109,7 @@ def main(argv=None) -> int:
     elif args.cmd == "demo":
         print(f"== AP invoice automation demo (extractor: {s.extractor}, as of {s.as_of}) ==")
         cmd_setup(s, conn)
-        jira = cmd_run(s, conn)
+        jira = cmd_run(s, conn, simulate_payments=True)  # demo only: treasury pays on due date
         cmd_sla(s, conn, jira)
         m = cmd_report(s, conn)
         print()

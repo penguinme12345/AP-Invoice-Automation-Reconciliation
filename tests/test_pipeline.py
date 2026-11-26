@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 
+from ap_automation import db
 from ap_automation.dashboard import build_dashboard
 from ap_automation.evaluate import VIEWS_FOR_BI, evaluate, export_bi
 from ap_automation.integrations.jira import MockJira, send_sla_reminders
@@ -40,7 +41,8 @@ def test_duplicate_flagged_and_original_approved(processed):
                         "WHERE invoice_number = ? ORDER BY invoice_id", (dup.invoice_number,)).fetchall()
     assert len(rows) == 2
     assert rows[0]["exception_codes"] == ""
-    assert rows[1]["exception_codes"] == "DUPLICATE_INVOICE"
+    # the resend is a duplicate, and it also bills units that were already billed
+    assert rows[1]["exception_codes"] == "DUPLICATE_INVOICE,QUANTITY_MISMATCH"
 
 
 def test_missing_po_goes_to_jira_not_payment(processed):
@@ -183,3 +185,83 @@ def test_cli_json_mode_for_orchestrators(tmp_path, capsys, monkeypatch):
     exc = [o for o in out if o["status"] == "EXCEPTION"]
     assert exc and all(o["ticket"] and o["ticket_key"] is None for o in exc)
     assert all(o["sheet_row"] for o in out if o["status"] == "APPROVED")
+
+    # exceptions are still recorded locally for reporting, then linked to the real Jira key
+    conn = db.connect(s.db_path)
+    assert conn.execute("SELECT COUNT(*) FROM exception_tickets WHERE ticket_key LIKE 'LOCAL-%'").fetchone()[0] == len(exc)
+    # a plain `run` never marks anything paid; that needs a real payment confirmation
+    assert conn.execute("SELECT COUNT(*) FROM invoices WHERE status = 'PAID'").fetchone()[0] == 0
+    first = exc[0]["invoice_id"]
+    assert main(["link-ticket", str(first), "AP-501"]) == 0
+    assert conn.execute("SELECT ticket_key FROM exception_tickets WHERE invoice_id = ?", (first,)).fetchone()[0] == "AP-501"
+    assert main(["link-ticket", str(first), "AP-502"]) == 1  # already linked
+
+
+def _add_invoice(conn, invoice_id_hint, po, vendor_id, number, lines, currency="USD", date="2026-11-10"):
+    """Insert a hand-built invoice (bypassing extraction) for targeted match tests."""
+    subtotal = round(sum(q * p for _, q, p in lines), 2)
+    cur = conn.execute(
+        """INSERT INTO invoices (source_file, file_sha256, received_at, extraction_status, vendor_name_raw, vendor_id,
+               invoice_number, po_number, invoice_date, due_date, currency, subtotal, tax, total, status)
+           VALUES (?,?,?, 'OK', 'x', ?,?,?,?,?,?,?,0,?, 'RECEIVED')""",
+        (f"{invoice_id_hint}.pdf", invoice_id_hint, "2026-11-19T10:00:00", vendor_id, number, po, date, "2026-12-10",
+         currency, subtotal, subtotal))
+    conn.executemany("INSERT INTO invoice_lines VALUES (?,?,?,?,?,?,?)",
+                     [(cur.lastrowid, ln, None, "item", q, p, round(q * p, 2)) for ln, q, p in lines])
+    return cur.lastrowid
+
+
+def _match_new(conn, tolerance=0.02):
+    rows = conn.execute(db.read_sql("three_way_match.sql"), {"tolerance": tolerance}).fetchall()
+    for r in rows:
+        conn.execute("""INSERT INTO match_results (invoice_id, extraction_failed, missing_po, po_not_found,
+                            vendor_not_approved, vendor_po_mismatch, currency_mismatch, duplicate_invoice,
+                            amount_out_of_tolerance, quantity_mismatch, expected_amount, amount_variance_pct,
+                            exception_codes, matched, matched_at)
+                        VALUES (:invoice_id,:extraction_failed,:missing_po,:po_not_found,:vendor_not_approved,
+                            :vendor_po_mismatch,:currency_mismatch,:duplicate_invoice,:amount_out_of_tolerance,
+                            :quantity_mismatch,:expected_amount,:amount_variance_pct,:exception_codes,
+                            :exception_codes = '', 'now')""", dict(r))
+    return {r["invoice_id"]: r["exception_codes"] for r in rows}
+
+
+@pytest.fixture
+def fresh(tmp_path):
+    s = make_settings(tmp_path)
+    conn, world = setup_world(s)
+    # an open PO with a full receipt and no invoices yet
+    po = conn.execute("""SELECT p.po_number, p.vendor_id FROM purchase_orders p JOIN vendors v USING (vendor_id)
+                         WHERE v.status = 'APPROVED' AND p.po_number IN (SELECT po_number FROM goods_receipts)
+                           AND p.po_number NOT IN (SELECT po_number FROM po_lines WHERE quantity < 2)
+                         LIMIT 1""").fetchone()
+    lines = conn.execute("SELECT line_no, quantity, unit_price FROM po_lines WHERE po_number = ? ORDER BY line_no",
+                         (po["po_number"],)).fetchall()
+    return conn, po, [(l["line_no"], l["quantity"], l["unit_price"]) for l in lines]
+
+
+def test_partial_invoices_cannot_bill_more_than_received_in_total(fresh):
+    conn, po, lines = fresh
+    first_half = [(ln, q // 2 or 1, p) for ln, q, p in lines]
+    rest = [(ln, q - (q // 2 or 1), p) for ln, q, p in lines]
+    a = _add_invoice(conn, "a", po["po_number"], po["vendor_id"], "P-1", first_half)
+    assert _match_new(conn)[a] == ""
+    b = _add_invoice(conn, "b", po["po_number"], po["vendor_id"], "P-2", rest, date="2026-11-12")
+    assert _match_new(conn)[b] == "", "billing the remainder is fine"
+    c = _add_invoice(conn, "c", po["po_number"], po["vendor_id"], "P-3", first_half, date="2026-11-14")
+    assert _match_new(conn)[c] == "QUANTITY_MISMATCH", "a third invoice over-bills the PO"
+
+
+def test_currency_mismatch_blocks_approval(fresh):
+    conn, po, lines = fresh
+    i = _add_invoice(conn, "eur", po["po_number"], po["vendor_id"], "EU-1", lines, currency="EUR")
+    assert _match_new(conn)[i] == "CURRENCY_MISMATCH"
+
+
+def test_sheet_values_cannot_inject_formulas(tmp_path):
+    from ap_automation.integrations.sheets import MockSheet, safe_cell
+
+    assert safe_cell("=HYPERLINK(\"http://x\")") == "'=HYPERLINK(\"http://x\")"
+    assert safe_cell("INV-1") == "INV-1" and safe_cell(-5.0) == -5.0
+    sheet = MockSheet(tmp_path)
+    sheet.append([1, "Vendor", "=1+1", "PO-10001", "IT", 10.0, "USD", "2026-12-01", "now"])
+    assert "'=1+1" in sheet.path.read_text()

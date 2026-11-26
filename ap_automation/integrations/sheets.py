@@ -10,7 +10,19 @@ import csv
 from pathlib import Path
 from typing import Protocol
 
-HEADER = ["Invoice ID", "Vendor", "Invoice #", "PO #", "Department", "Amount", "Due date", "Approved at"]
+HEADER = ["Invoice ID", "Vendor", "Invoice #", "PO #", "Department", "Amount", "Currency", "Due date", "Approved at"]
+
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def safe_cell(v):
+    """Neutralise text a spreadsheet would treat as a formula.
+
+    Invoice numbers and vendor names come from vendor documents, so a value such as
+    '=HYPERLINK(...)' must land as text, not run in the shared payment workbook."""
+    if isinstance(v, str) and v.startswith(_FORMULA_START):
+        return "'" + v
+    return v
 
 
 class ApprovedSheet(Protocol):
@@ -27,7 +39,7 @@ class MockSheet:
 
     def append(self, row: list) -> None:
         with self.path.open("a", newline="") as fh:
-            csv.writer(fh).writerow(row)
+            csv.writer(fh).writerow([safe_cell(v) for v in row])
 
 
 class GoogleSheet:
@@ -47,7 +59,8 @@ class GoogleSheet:
             self.ws.append_row(HEADER)
 
     def append(self, row: list) -> None:
-        self.ws.append_row(row, value_input_option="USER_ENTERED")
+        # RAW: values are stored exactly as given and never parsed as formulas.
+        self.ws.append_row(row, value_input_option="RAW")
 
 
 class NullSheet:

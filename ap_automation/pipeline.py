@@ -24,7 +24,7 @@ from . import db
 from .config import Settings
 from .extraction import InvoiceExtractor
 from .integrations.drive import InboxFile, InvoiceSource, LocalFolderSource
-from .integrations.jira import JiraClient, MockJira, NullJira, build_ticket, send_sla_reminders
+from .integrations.jira import JiraClient, LocalRecordJira, MockJira, build_ticket, send_sla_reminders
 from .integrations.sheets import ApprovedSheet, MockSheet, NullSheet
 
 _SUFFIX = re.compile(r"\b(inc|llc|ltd|llp|co|corp|corporation|company|limited)\b\.?", re.I)
@@ -122,8 +122,12 @@ class Pipeline:
         rows = self.conn.execute(self.match_sql, {"tolerance": self.s.amount_tolerance_pct}).fetchall()
         for r in rows:
             self.conn.execute(
-                """INSERT INTO match_results VALUES (:invoice_id,:extraction_failed,:missing_po,:po_not_found,
-                       :vendor_not_approved,:vendor_po_mismatch,:duplicate_invoice,:amount_out_of_tolerance,
+                """INSERT INTO match_results (invoice_id, extraction_failed, missing_po, po_not_found,
+                       vendor_not_approved, vendor_po_mismatch, currency_mismatch, duplicate_invoice,
+                       amount_out_of_tolerance, quantity_mismatch, expected_amount, amount_variance_pct,
+                       exception_codes, matched, matched_at)
+                   VALUES (:invoice_id,:extraction_failed,:missing_po,:po_not_found,
+                       :vendor_not_approved,:vendor_po_mismatch,:currency_mismatch,:duplicate_invoice,:amount_out_of_tolerance,
                        :quantity_mismatch,:expected_amount,:amount_variance_pct,:exception_codes,:matched,:matched_at)""",
                 {**dict(r), "matched": int(r["exception_codes"] == ""), "matched_at": now_iso})
         return rows
@@ -138,7 +142,7 @@ class Pipeline:
         if not codes:
             vendor = self.conn.execute("SELECT name FROM vendors WHERE vendor_id = ?", (row["vendor_id"],)).fetchone()
             sheet_row = [invoice_id, vendor["name"], row["invoice_number"], row["po_number"], row["dept"],
-                         round(row["total"], 2), row["due_date"], now_iso]
+                         round(row["total"], 2), row["currency"], row["due_date"], now_iso]
             self.conn.execute("INSERT INTO approved_for_payment VALUES (?,?,?,?,?,?,?)",
                               (invoice_id, vendor["name"], row["invoice_number"], row["po_number"], row["total"],
                                row["due_date"], now_iso))
@@ -191,7 +195,10 @@ class Pipeline:
 
 
 def payment_run(conn: sqlite3.Connection, as_of: str) -> int:
-    """Treasury pays approved invoices on their due date (simulated)."""
+    """DEMO ONLY: simulate treasury paying approved invoices on their due date.
+
+    Production status changes to PAID must come from a real payment confirmation
+    (ERP / bank file), so this is never called by `run`."""
     rows = conn.execute(
         "SELECT invoice_id, total, due_date FROM invoices WHERE status = 'APPROVED' AND due_date <= ?",
         (as_of,)).fetchall()
@@ -214,7 +221,9 @@ def build_components(settings: Settings, conn: sqlite3.Connection, integrations:
         source = LocalFolderSource(settings.inbox_dir, arrival_times)
 
     if integrations == "none":
-        jira, sheet = NullJira(), NullSheet()
+        # The orchestrator creates the real Jira issue; keep a local record so reporting still
+        # sees the exception, and let the orchestrator attach the real key with `link-ticket`.
+        jira, sheet = LocalRecordJira(conn), NullSheet()
     else:
         if settings.jira_mode == "live":
             from .integrations.jira import JiraCloud
@@ -240,6 +249,14 @@ def load_arrival_times(settings: Settings) -> dict[str, str]:
 def run_sla_job(conn: sqlite3.Connection, jira: JiraClient, settings: Settings) -> list[str]:
     as_of = datetime.combine(settings.as_of, datetime.min.time()) + timedelta(hours=9)
     return send_sla_reminders(conn, jira, as_of, settings.sla_days)
+
+
+def link_ticket(conn: sqlite3.Connection, invoice_id: int, key: str) -> bool:
+    """Replace the local placeholder key with the Jira key an orchestrator created."""
+    cur = conn.execute("UPDATE exception_tickets SET ticket_key = ? WHERE invoice_id = ? AND ticket_key LIKE 'LOCAL-%'",
+                       (key, invoice_id))
+    conn.commit()
+    return cur.rowcount == 1
 
 
 def set_as_of(conn: sqlite3.Connection, as_of: str) -> None:

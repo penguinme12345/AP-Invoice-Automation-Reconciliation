@@ -113,7 +113,8 @@ SCENARIO_CODES = {
     "within_tolerance": [],                     # small price variance, still auto-approved
     "missing_po": ["MISSING_PO"],
     "unknown_po": ["PO_NOT_FOUND"],
-    "duplicate": ["DUPLICATE_INVOICE"],
+    # a resend bills the same units again, so the cumulative quantity check fires too
+    "duplicate": ["DUPLICATE_INVOICE", "QUANTITY_MISMATCH"],
     "amount_variance": ["AMOUNT_OUT_OF_TOLERANCE"],
     "quantity_mismatch": ["QUANTITY_MISMATCH"],
     "unapproved_vendor": ["VENDOR_NOT_APPROVED"],

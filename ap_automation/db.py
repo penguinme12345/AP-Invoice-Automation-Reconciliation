@@ -21,6 +21,10 @@ def read_sql(name: str) -> str:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(read_sql("schema.sql"))
+    # forward-migrate databases created before a column existed
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(match_results)")}
+    if "currency_mismatch" not in cols:
+        conn.execute("ALTER TABLE match_results ADD COLUMN currency_mismatch INTEGER NOT NULL DEFAULT 0")
     conn.executescript(read_sql("views.sql"))
     conn.commit()
 

@@ -11,6 +11,9 @@ one is in neither place, something is wrong.**
 | Intake + match | New PDF in the Drive intake folder (n8n / Workato, every 5 min) | `python -m ap_automation run --json --integrations none` (orchestrator does Jira + Sheets) or `python -m ap_automation run` (Python does them) |
 | SLA reminders | Jira Automation scheduled rule, daily 9:00 (or `python -m ap_automation sla`) | |
 | Dashboard + BI CSVs | Weekdays 7:00 | `python -m ap_automation report` |
+| Link Jira key | After the orchestrator creates the issue | `python -m ap_automation link-ticket <invoice_id> <JIRA-KEY>` (replaces the `LOCAL-<id>` placeholder) |
+
+`run` never marks invoices paid. `PAID` status (and the `payments` table) is simulated only by `demo`; in production it must come from the ERP or bank payment confirmation.
 
 State lives in the SQL database (`AP_DB_PATH`, default `data/ap.db`). Each run
 is logged in `pipeline_runs`.
@@ -41,9 +44,10 @@ is logged in `pipeline_runs`.
 | `PO_NOT_FOUND` | PO number printed but not in the ERP. | Usually a typo or a PO from another entity. Correct it with the vendor. |
 | `VENDOR_NOT_APPROVED` | Vendor is pending onboarding or blocked. | Do not pay. Send to Procurement / vendor management. |
 | `VENDOR_PO_MISMATCH` | The PO belongs to a different vendor. | Check for a reseller or acquired vendor; otherwise reject. |
+| `CURRENCY_MISMATCH` | Invoice is in a different currency from the PO. | Confirm the agreed currency with the buyer; ask the vendor to reissue, or amend the PO. |
 | `DUPLICATE_INVOICE` | Same vendor + invoice number (or same vendor, date and total) already received. | Confirm the original was approved or paid, then close the ticket and reply to the vendor. Never pay both. |
 | `AMOUNT_OUT_OF_TOLERANCE` | Invoice subtotal differs from PO price × billed quantity by more than ±2%. The ticket shows the variance. | Ask the buyer whether a price change was agreed. Get a credit note or a PO change order. |
-| `QUANTITY_MISMATCH` | Billed quantity is more than was received or ordered. | Check with receiving. If goods are still coming, hold until the receipt is posted, then re-run. |
+| `QUANTITY_MISMATCH` | Units billed (this invoice plus earlier approved invoices on the same PO line) are more than were received or ordered. | Check with receiving. If goods are still coming, hold until the receipt is posted, then re-run. |
 
 After fixing the underlying data (e.g. PO amended or receipt posted), the
 invoice needs a re-match. Today that means deleting its `match_results` row and

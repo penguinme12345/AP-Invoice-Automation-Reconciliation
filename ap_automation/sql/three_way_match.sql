@@ -8,9 +8,11 @@
 --   PO_NOT_FOUND             PO number printed but not in the ERP
 --   VENDOR_NOT_APPROVED      vendor unknown, pending or blocked in the vendor master
 --   VENDOR_PO_MISMATCH       PO belongs to a different vendor
+--   CURRENCY_MISMATCH        invoice currency differs from the PO currency
 --   DUPLICATE_INVOICE        same vendor + invoice number (or same vendor + date + total) seen before
 --   AMOUNT_OUT_OF_TOLERANCE  invoice subtotal vs (invoiced qty x PO unit price) off by more than :tolerance
---   QUANTITY_MISMATCH        invoiced qty exceeds received qty or ordered qty, or line not on the PO
+--   QUANTITY_MISMATCH        invoiced qty plus qty already billed on earlier approved invoices for the
+--                            same PO line exceeds received or ordered qty, or line not on the PO
 --
 -- Parameter: :tolerance  (0.02 = +/-2%)
 
@@ -26,10 +28,24 @@ received AS (                -- cumulative receipts per PO line
     GROUP BY po_number, line_no
 ),
 
+billed_before AS (         -- units already billed on earlier, approved invoices per PO line
+    SELECT
+        il.invoice_id,
+        il.line_no,
+        SUM(pil.quantity) AS qty_billed_before
+    FROM new_inv n
+    JOIN invoice_lines il   ON il.invoice_id = n.invoice_id
+    JOIN invoices pi        ON pi.po_number = n.po_number AND pi.invoice_id < n.invoice_id
+    JOIN match_results pm   ON pm.invoice_id = pi.invoice_id AND pm.matched = 1
+    JOIN invoice_lines pil  ON pil.invoice_id = pi.invoice_id AND pil.line_no = il.line_no
+    GROUP BY il.invoice_id, il.line_no
+),
+
 line_check AS (
     SELECT
         il.invoice_id,
         il.line_no,
+        il.quantity + COALESCE(bb.qty_billed_before, 0) AS qty_billed_total,
         il.quantity                       AS qty_invoiced,
         pl.quantity                       AS qty_ordered,
         COALESCE(r.qty_received, 0)       AS qty_received,
@@ -42,6 +58,8 @@ line_check AS (
                               AND (il.sku IS NULL OR il.sku = pl.sku)
     LEFT JOIN received r       ON r.po_number = n.po_number
                               AND r.line_no   = il.line_no
+    LEFT JOIN billed_before bb ON bb.invoice_id = il.invoice_id
+                              AND bb.line_no    = il.line_no
 ),
 
 line_agg AS (
@@ -49,8 +67,8 @@ line_agg AS (
         invoice_id,
         SUM(expected_amount)                                            AS expected_amount,
         MAX(CASE WHEN po_unit_price IS NULL THEN 1 ELSE 0 END)          AS line_not_on_po,
-        MAX(CASE WHEN qty_invoiced > qty_received + 1e-9
-                   OR qty_invoiced > qty_ordered  + 1e-9 THEN 1 ELSE 0 END) AS qty_exceeds
+        MAX(CASE WHEN qty_billed_total > qty_received + 1e-9
+                   OR qty_billed_total > qty_ordered  + 1e-9 THEN 1 ELSE 0 END) AS qty_exceeds
     FROM line_check
     GROUP BY invoice_id
 ),
@@ -83,6 +101,9 @@ flags AS (
              THEN 1 ELSE 0 END AS vendor_not_approved,
         CASE WHEN n.extraction_status = 'OK' AND p.po_number IS NOT NULL AND p.vendor_id <> n.vendor_id
              THEN 1 ELSE 0 END AS vendor_po_mismatch,
+        CASE WHEN n.extraction_status = 'OK' AND p.po_number IS NOT NULL
+              AND UPPER(COALESCE(n.currency, '')) <> UPPER(p.currency)
+             THEN 1 ELSE 0 END AS currency_mismatch,
         CASE WHEN n.extraction_status = 'OK' THEN COALESCE(d.is_duplicate, 0) ELSE 0 END AS duplicate_invoice,
         CASE WHEN n.extraction_status = 'OK' AND p.po_number IS NOT NULL
               AND (la.line_not_on_po = 1
@@ -110,6 +131,7 @@ SELECT
         CASE WHEN po_not_found             = 1 THEN 'PO_NOT_FOUND,'            ELSE '' END ||
         CASE WHEN vendor_not_approved      = 1 THEN 'VENDOR_NOT_APPROVED,'     ELSE '' END ||
         CASE WHEN vendor_po_mismatch       = 1 THEN 'VENDOR_PO_MISMATCH,'      ELSE '' END ||
+        CASE WHEN currency_mismatch        = 1 THEN 'CURRENCY_MISMATCH,'       ELSE '' END ||
         CASE WHEN duplicate_invoice        = 1 THEN 'DUPLICATE_INVOICE,'       ELSE '' END ||
         CASE WHEN amount_out_of_tolerance  = 1 THEN 'AMOUNT_OUT_OF_TOLERANCE,' ELSE '' END ||
         CASE WHEN quantity_mismatch        = 1 THEN 'QUANTITY_MISMATCH,'       ELSE '' END,

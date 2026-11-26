@@ -92,7 +92,7 @@ Sample PDFs of each case are in [`samples/invoices/`](samples/invoices/).
 | Small price variance | 10 | 0.3–1.6% over PO | within ±2% tolerance | approved |
 | Missing PO number | 6 | PO line left off the invoice | SQL | `MISSING_PO` |
 | Unknown PO | 3 | PO number not in the ERP | SQL | `PO_NOT_FOUND` |
-| Duplicate | 6 | Vendor re-sends an invoice already processed, as a "payment reminder" | SQL (vendor + normalised invoice #, or vendor + date + total) | `DUPLICATE_INVOICE` |
+| Duplicate | 6 | Vendor re-sends an invoice already processed, as a "payment reminder" | SQL (vendor + normalised invoice #, or vendor + date + total; the re-billed units also trip the cumulative quantity check) | `DUPLICATE_INVOICE`, `QUANTITY_MISMATCH` |
 | Price out of tolerance | 8 | Unit prices 5–15% over PO | SQL | `AMOUNT_OUT_OF_TOLERANCE` |
 | Short shipment | 6 | Bills full PO qty, receipt shows less | SQL | `QUANTITY_MISMATCH` |
 | Unapproved vendor | 5 | Vendor is BLOCKED or PENDING in the vendor master | SQL | `VENDOR_NOT_APPROVED` |
@@ -120,7 +120,7 @@ data/inbox/*.pdf ──► extraction.py ──► models.py ──► SQLite �
 | `ap_automation/sql/schema.sql` | ERP tables + AP tables (`invoices`, `invoice_lines`, `match_results`, `exception_tickets`, `approved_for_payment`, `payments`, `pipeline_runs`). |
 | `ap_automation/sql/three_way_match.sql` | The match: one CTE per control, one row per invoice with a flag per control and the exception codes. |
 | `ap_automation/sql/views.sql` | Reporting views: aging, spend, budget vs actual, exception summary, processing time, KPIs. |
-| `ap_automation/pipeline.py` | Orchestration, vendor-name resolution, idempotency (SHA-256 per file), routing, simulated payment run. |
+| `ap_automation/pipeline.py` | Orchestration, vendor-name resolution, idempotency (SHA-256 per file), routing. The simulated payment run (approved invoices marked paid on their due date) only runs in `demo`. |
 | `ap_automation/integrations/` | `drive.py` (local folder / Drive API), `jira.py` (mock / Jira Cloud REST v3, routing rules, SLA reminders), `sheets.py` (CSV / gspread). |
 | `ap_automation/dashboard.py` | Self-contained HTML dashboard over the views. |
 | `ap_automation/evaluate.py` | Scores a run against ground truth, exports BI CSVs, writes the report. |
@@ -132,9 +132,10 @@ data/inbox/*.pdf ──► extraction.py ──► models.py ──► SQLite �
 | PO present | `invoices.po_number IS NOT NULL` |
 | PO exists | PO number found in `purchase_orders` |
 | Vendor approved | resolved vendor exists and `vendors.status = 'APPROVED'`; PO belongs to the same vendor |
+| Currency | invoice currency equals the PO currency (`CURRENCY_MISMATCH` otherwise) |
 | Not a duplicate | no earlier invoice from the same vendor with the same normalised invoice number, or the same date and total |
 | Amount | `|invoice subtotal − Σ(billed qty × PO unit price)| ≤ 2% × that value` (tax excluded) |
-| Quantity | each billed line ≤ cumulative quantity received and ≤ quantity ordered; every billed line exists on the PO |
+| Quantity | per PO line, units on this invoice plus units already billed on earlier approved invoices ≤ quantity received and ≤ quantity ordered; every billed line exists on the PO |
 
 ## Running with real services
 
@@ -175,13 +176,19 @@ how a Workato recipe would split the work too.
 
 ```
 Drive trigger → Download → Save to inbox → Execute command (python) → Split items → IF clean?
-                                                                           ├─ yes → Google Sheets: append row
-                                                                           └─ no  → Jira: create issue
+                                                                           ├─ yes → Google Sheets: append row (RAW)
+                                                                           └─ no  → Jira REST: create issue → link-ticket (key back to SQL)
 Schedule (weekdays 7am) → Execute command: report
 ```
 
 After import, attach Google Drive / Sheets / Jira credentials and replace the
-`REPLACE_WITH_...` IDs (the Jira node expects component IDs, not names).
+`REPLACE_WITH_...` placeholders. Jira issues are created with an HTTP Request
+node against the REST API so components can be set by name. In
+`--integrations none` mode the pipeline still records each exception locally as
+`LOCAL-<invoice_id>`, and the workflow's last step runs
+`python -m ap_automation link-ticket <invoice_id> <JIRA-KEY>` so the dashboard
+and SLA reporting see the real ticket. Sheet rows are appended as RAW values so
+vendor-supplied text can never run as a formula.
 
 | This project (n8n) | Workato equivalent |
 |---|---|
@@ -192,7 +199,7 @@ After import, attach Google Drive / Sheets / Jira credentials and replace the
 | Code node (split JSON into items) | Repeat (for each) over the JSON list, with a datapill per field |
 | IF node `status == APPROVED` | IF condition step |
 | Google Sheets *Append* | Google Sheets *Add row* |
-| Jira *Create issue* | Jira *Create issue* |
+| HTTP Request to Jira REST *Create issue*, then `link-ticket` | Jira *Create issue*, then a Python / on-prem step to record the key |
 | Schedule Trigger | Scheduler trigger |
 | Credentials | Connections |
 | Execution log / retries | Job history, error monitor, *On error* retry block |

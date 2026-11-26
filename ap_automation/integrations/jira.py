@@ -29,6 +29,8 @@ CODE_TEXT = {
     "PO_NOT_FOUND": "PO number on the invoice does not exist in the ERP. Check for a typo or another entity.",
     "VENDOR_NOT_APPROVED": "Vendor is not approved (pending onboarding or blocked). Do not pay until Procurement clears it.",
     "VENDOR_PO_MISMATCH": "The PO belongs to a different vendor.",
+    "CURRENCY_MISMATCH": "Invoice currency differs from the PO currency. Amounts are not comparable; confirm the "
+                         "agreed currency with the buyer.",
     "DUPLICATE_INVOICE": "This invoice number was already received from this vendor. Likely a resend; confirm and reject.",
     "AMOUNT_OUT_OF_TOLERANCE": "Invoice amount differs from PO price x billed quantity by more than the tolerance.",
     "QUANTITY_MISMATCH": "Billed quantity is more than was received (or ordered). Check with the receiving team.",
@@ -178,10 +180,19 @@ class JiraCloud:
         r.raise_for_status()
 
 
-class NullJira:
-    """Used when an orchestrator (n8n / Workato) creates the tickets itself."""
+class LocalRecordJira:
+    """Used when an orchestrator (n8n / Workato) creates the Jira issue itself.
+
+    The ticket is recorded locally as LOCAL-<invoice_id> so the dashboard and SLA
+    reporting still see it; the orchestrator then calls
+    `python -m ap_automation link-ticket <invoice_id> <JIRA-KEY>`. Returns None so the
+    JSON outcome shows the issue still has to be created."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
 
     def create_issue(self, ticket: TicketRequest) -> None:
+        _store(self.conn, f"LOCAL-{ticket.invoice_id}", ticket)
         return None
 
     def add_comment(self, key: str, body: str) -> None:

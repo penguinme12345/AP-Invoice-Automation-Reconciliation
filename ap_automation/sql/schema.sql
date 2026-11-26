@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS match_results (
     po_not_found             INTEGER NOT NULL,
     vendor_not_approved      INTEGER NOT NULL,
     vendor_po_mismatch       INTEGER NOT NULL,
+    currency_mismatch        INTEGER NOT NULL,
     duplicate_invoice        INTEGER NOT NULL,
     amount_out_of_tolerance  INTEGER NOT NULL,
     quantity_mismatch        INTEGER NOT NULL,
