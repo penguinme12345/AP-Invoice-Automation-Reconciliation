@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ap-automation"
+version = "0.1.0"
+description = "AP invoice automation: LangChain extraction, Pydantic validation, SQL three-way match, Jira exceptions"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7",
+    "langchain-core>=0.3",
+    "langchain-anthropic>=0.3",
+    "pdfplumber>=0.11",
+    "pypdfium2>=4.30",
+    "reportlab>=4.0",
+    "pillow>=10.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+google = ["gspread>=6.0", "google-api-python-client>=2.100", "google-auth>=2.23"]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["ap_automation*"]
+
+[tool.setuptools.package-data]
+ap_automation = ["sql/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
