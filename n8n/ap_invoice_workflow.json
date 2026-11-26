@@ -1,0 +1,351 @@
+{
+  "name": "AP invoice automation (procure-to-pay)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 5,
+              "unit": "minutes"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "REPLACE_WITH_DRIVE_INBOX_FOLDER_ID",
+          "mode": "id"
+        },
+        "event": "fileCreated",
+        "options": {
+          "fileType": "application/pdf"
+        }
+      },
+      "id": "a1f0c7f2-0001-4c11-9a01-000000000001",
+      "name": "New invoice in Drive folder",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Workato equivalent: Google Drive trigger 'New file in folder'."
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {
+          "binaryPropertyName": "data"
+        }
+      },
+      "id": "a1f0c7f2-0002-4c11-9a01-000000000002",
+      "name": "Download PDF",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/opt/ap-automation/data/inbox/{{ $('New invoice in Drive folder').item.json.name }}",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "id": "a1f0c7f2-0003-4c11-9a01-000000000003",
+      "name": "Save to pipeline inbox",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/ap-automation && AP_EXTRACTOR=llm python -m ap_automation run --json --integrations none"
+      },
+      "id": "a1f0c7f2-0004-4c11-9a01-000000000004",
+      "name": "Extract, validate, three-way match",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        660,
+        300
+      ],
+      "notes": "Python does extraction (LangChain + Claude), the Pydantic gate and the SQL match. --integrations none leaves Jira and Sheets to this workflow. Workato equivalent: a Python/Ruby action or an on-prem agent command."
+    },
+    {
+      "parameters": {
+        "jsCode": "const outcomes = JSON.parse($input.first().json.stdout || '[]');\nreturn outcomes.map(o => ({ json: o }));"
+      },
+      "id": "a1f0c7f2-0005-4c11-9a01-000000000005",
+      "name": "One item per invoice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "APPROVED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1f0c7f2-0006-4c11-9a01-000000000006",
+      "name": "Clean three-way match?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ],
+      "notes": "Workato equivalent: IF condition step."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_APPROVED_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Approved for payment",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Invoice ID": "={{ $json.sheet_row[0] }}",
+            "Vendor": "={{ $json.sheet_row[1] }}",
+            "Invoice #": "={{ $json.sheet_row[2] }}",
+            "PO #": "={{ $json.sheet_row[3] }}",
+            "Department": "={{ $json.sheet_row[4] }}",
+            "Amount": "={{ $json.sheet_row[5] }}",
+            "Currency": "={{ $json.sheet_row[6] }}",
+            "Due date": "={{ $json.sheet_row[7] }}",
+            "Approved at": "={{ $json.sheet_row[8] }}"
+          }
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "a1f0c7f2-0007-4c11-9a01-000000000007",
+      "name": "Append to Approved for payment sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        1340,
+        180
+      ],
+      "notes": "Cell format RAW so vendor-supplied text is never parsed as a formula. Workato equivalent: Google Sheets 'Add row'."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://REPLACE_WITH_YOUR_SITE.atlassian.net/rest/api/3/issue",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ fields: { project: { key: 'AP' }, issuetype: { name: 'Task' }, summary: $json.ticket.summary, priority: { name: $json.ticket.priority }, labels: $json.ticket.labels, components: [{ name: $json.ticket.component }], description: { type: 'doc', version: 1, content: $json.ticket.description.split('\\n').map(t => t ? { type: 'paragraph', content: [{ type: 'text', text: t }] } : { type: 'paragraph' }) } } }) }}",
+        "options": {}
+      },
+      "id": "a1f0c7f2-0008-4c11-9a01-000000000008",
+      "name": "Create Jira exception ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1340,
+        420
+      ],
+      "notes": "Jira Cloud REST v3 with components by name (the built-in Jira node only takes component IDs). Component and labels drive the Jira Automation rules. Workato equivalent: Jira 'Create issue'."
+    },
+    {
+      "parameters": {
+        "command": "=cd /opt/ap-automation && python -m ap_automation link-ticket {{ $('Clean three-way match?').item.json.invoice_id }} {{ $json.key }}"
+      },
+      "id": "a1f0c7f2-0011-4c11-9a01-000000000011",
+      "name": "Record Jira key in SQL",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        420
+      ],
+      "notes": "Replaces the LOCAL-<invoice_id> placeholder so the dashboard, SLA reporting and runbook queries see the real Jira key."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "a1f0c7f2-0009-4c11-9a01-000000000009",
+      "name": "Weekdays 7am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        620
+      ],
+      "notes": "Refreshes the reporting views and dashboard. Workato equivalent: Scheduler trigger."
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/ap-automation && python -m ap_automation report"
+      },
+      "id": "a1f0c7f2-0010-4c11-9a01-000000000010",
+      "name": "Refresh dashboard + BI exports",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        220,
+        620
+      ]
+    }
+  ],
+  "connections": {
+    "New invoice in Drive folder": {
+      "main": [
+        [
+          {
+            "node": "Download PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download PDF": {
+      "main": [
+        [
+          {
+            "node": "Save to pipeline inbox",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to pipeline inbox": {
+      "main": [
+        [
+          {
+            "node": "Extract, validate, three-way match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract, validate, three-way match": {
+      "main": [
+        [
+          {
+            "node": "One item per invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per invoice": {
+      "main": [
+        [
+          {
+            "node": "Clean three-way match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean three-way match?": {
+      "main": [
+        [
+          {
+            "node": "Append to Approved for payment sheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Jira exception ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekdays 7am": {
+      "main": [
+        [
+          {
+            "node": "Refresh dashboard + BI exports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Jira exception ticket": {
+      "main": [
+        [
+          {
+            "node": "Record Jira key in SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "active": false,
+  "tags": [
+    {
+      "name": "accounts-payable"
+    }
+  ]
+}
